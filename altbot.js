@@ -390,7 +390,7 @@ function userDash(u) {
   const lr = u.state.lastRun ? new Date(u.state.lastRun).toLocaleTimeString('fr-FR') : '—';
   const tp = u.yapsonToken ? u.yapsonToken.substring(0,8)+'•'.repeat(12)+u.yapsonToken.slice(-4) : '(non défini)';
   const logs = u.state.logs.slice(0,80).map(l=>`<div>${l}</div>`).join('');
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ALT-BOT — ${u.username}</title><meta http-equiv="refresh" content="10"><style>${CSS}</style></head><body>
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ALT-BOT — ${u.username}</title><style>${CSS}</style></head><body>
 <div class="row" style="justify-content:space-between;margin-bottom:14px"><h1>🤖 ${u.username}</h1><a href="/logout" class="btn btn-red">Déconnexion</a></div>
 <div style="margin-bottom:12px"><span class="status ${sc}">${labels[sc]||sc}</span><span style="font-size:11px;color:#6c7086;margin-left:8px">Polls: ${u.state.polls} | ${lr}</span></div>
 <div class="grid">
@@ -423,6 +423,11 @@ function userDash(u) {
 <div class="section"><div class="section-title">🍪 Cookies my-managment</div>
 <form method="POST" action="/user/cookies"><textarea name="cookies" rows="3" style="width:100%;margin-bottom:8px" placeholder='[{"name":"...","value":"..."}]'></textarea><br><button class="btn btn-blue">💉 Injecter</button></form></div>
 <div class="section"><div class="section-title">📋 Logs</div><div class="logs">${logs}</div></div>
+<script>
+if (${JSON.stringify(u.state.status)} === 'running') {
+  setTimeout(() => location.reload(), 10000);
+}
+</script>
 </body></html>`;
 }
 
@@ -437,7 +442,7 @@ function adminDash(err='', ok='') {
 <td>${u.yapsonToken?'<span class="badge ok">✅</span>':'<span class="badge ko">⚠</span>'}</td>
 <td><form method="POST" action="/admin/delete-user" style="display:inline"><input type="hidden" name="userId" value="${u.id}"><button class="btn btn-red" style="font-size:10px;padding:3px 7px" onclick="return confirm('Supprimer ${u.username} ?')">Supprimer</button></form></td>
 </tr>`).join('');
-  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ALT-BOT Admin</title><meta http-equiv="refresh" content="15"><style>${CSS}</style></head><body>
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ALT-BOT Admin</title><style>${CSS}</style></head><body>
 <div class="row" style="justify-content:space-between;margin-bottom:14px"><h1>🛡 Administration</h1><a href="/logout" class="btn btn-red">Déconnexion</a></div>
 ${err?`<div style="color:#f38ba8;font-size:12px;margin-bottom:10px">❌ ${err}</div>`:''}
 ${ok?`<div style="color:#a6e3a1;font-size:12px;margin-bottom:10px">✅ ${ok}</div>`:''}

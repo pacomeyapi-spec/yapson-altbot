@@ -229,10 +229,30 @@ async function yapsonApprove(msgId) {
 let browser = null;
 let page    = null;
 
+async function installPlaywright() {
+  const { execSync } = require('child_process');
+  try {
+    execSync('npx playwright install chromium --with-deps', { stdio: 'inherit', timeout: 120000 });
+    log('✅ Playwright Chromium installé');
+  } catch(e) {
+    log('⚠ Installation Playwright: ' + e.message.substring(0, 80));
+  }
+}
+
 async function ensureBrowser() {
   if (!browser || !browser.isConnected()) {
     log('🚀 Lancement Chromium…');
-    browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    try {
+      browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    } catch(e) {
+      if (e.message.includes('Executable') || e.message.includes('doesn\'t exist')) {
+        log('🔧 Chromium manquant — installation en cours…');
+        await installPlaywright();
+        browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+      } else {
+        throw e;
+      }
+    }
   }
   if (!page || page.isClosed()) {
     page = await browser.newPage();

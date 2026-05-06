@@ -4,7 +4,8 @@
   "description": "ALT-BOT — Confirmation dépôts my-managment via YapsonPress",
   "main": "altbot.js",
   "scripts": {
-    "start": "node altbot.js"
+    "start": "node altbot.js",
+    "postinstall": "npx playwright install chromium --with-deps"
   },
   "dependencies": {
     "express": "^4.18.2",

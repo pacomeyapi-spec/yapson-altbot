@@ -23,6 +23,35 @@ const INTERVAL_SEC = parseInt(process.env.INTERVAL_SEC || '30', 10);
 const PORT         = parseInt(process.env.PORT || '3000', 10);
 let   ADMIN_USER   = process.env.ADMIN_USER || 'admin';
 let   ADMIN_PASS   = process.env.ADMIN_PASS || 'admin123';
+// ── Alertes ntfy.sh ──────────────────────────────────────────
+const NTFY_TOPIC = process.env.NTFY_TOPIC || 'YapsRt';
+let _ntfyLastMsg = ''; let _ntfyLastTime = 0;
+function sendNotif(title, msg, priority) {
+  const now = Date.now();
+  const key = title + msg;
+  if (key === _ntfyLastMsg && now - _ntfyLastTime < 60000) return;
+  _ntfyLastMsg = key; _ntfyLastTime = now;
+  const https = require('https');
+  const body = String(msg);
+  const opts = {
+    hostname: 'ntfy.sh',
+    path: '/' + NTFY_TOPIC,
+    method: 'POST',
+    headers: {
+      'Title': title,
+      'Priority': priority || 'default',
+      'Tags': priority === 'urgent' ? 'rotating_light' : 'warning',
+      'Content-Length': Buffer.byteLength(body),
+    },
+  };
+  const req = https.request(opts, (res) => {
+    res.on('data', () => {});
+    res.on('end', () => console.log('[NTFY] Alerte envoyée:', res.statusCode));
+  });
+  req.on('error', (e) => console.error('[NTFY] Erreur envoi:', e.message));
+  req.write(body);
+  req.end();
+}
 
 const CONF_MIN_ALLOWED = [2, 10, 30];
 const REJ_MIN_ALLOWED  = [45, 50, 60];
@@ -68,10 +97,22 @@ function createUser(username, password) {
   return users[id];
 }
 function ulog(u, msg) {
-  const entry = `[${new Date().toLocaleTimeString('fr-FR')}] ${msg}`;
-  console.log(`[${u.username}] ${entry}`);
+  const entry = '[' + new Date().toLocaleTimeString('fr-FR') + '] ' + msg;
+  console.log('[' + u.username + '] ' + entry);
   u.state.logs.unshift(entry);
   if (u.state.logs.length > 200) u.state.logs.pop();
+  // Alertes ntfy
+  const m = String(msg).toLowerCase();
+  const isCookieErr = m.includes('cookie') || m.includes('session expir') || m.includes('cookies refus') || m.includes('cookies timeout') || m.includes('is_guest');
+  const isTokenErr  = m.includes('yapsonpress') || m.includes('token yapsonpress') || m.includes('yapson') && (m.includes('401') || m.includes('403') || m.includes('manquant'));
+  const isGenericErr = msg.includes('\u274c') || msg.startsWith('\u274c') || (m.includes('erreur') || m.includes('error')) && !m.includes('0 erreur');
+  if (isCookieErr) {
+    sendNotif('AltBot COOKIES EXPIRES [' + u.username + ']', msg.substring(0, 300), 'urgent');
+  } else if (isTokenErr) {
+    sendNotif('AltBot TOKEN YAPSON EXPIRE [' + u.username + ']', msg.substring(0, 300), 'urgent');
+  } else if (isGenericErr) {
+    sendNotif('AltBot ERREUR [' + u.username + ']', msg.substring(0, 300), 'urgent');
+  }
 }
 
 // ── Utilitaires ───────────────────────────────────────────────

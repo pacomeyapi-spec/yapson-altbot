@@ -23,35 +23,6 @@ const INTERVAL_SEC = parseInt(process.env.INTERVAL_SEC || '30', 10);
 const PORT         = parseInt(process.env.PORT || '3000', 10);
 let   ADMIN_USER   = process.env.ADMIN_USER || 'admin';
 let   ADMIN_PASS   = process.env.ADMIN_PASS || 'admin123';
-// ── Alertes ntfy.sh ──────────────────────────────────────────
-const NTFY_TOPIC = process.env.NTFY_TOPIC || 'YapsRt';
-let _ntfyLastMsg = ''; let _ntfyLastTime = 0;
-function sendNotif(title, msg, priority) {
-  const now = Date.now();
-  const key = title + msg;
-  if (key === _ntfyLastMsg && now - _ntfyLastTime < 60000) return;
-  _ntfyLastMsg = key; _ntfyLastTime = now;
-  const https = require('https');
-  const body = String(msg);
-  const opts = {
-    hostname: 'ntfy.sh',
-    path: '/' + NTFY_TOPIC,
-    method: 'POST',
-    headers: {
-      'Title': title,
-      'Priority': priority || 'default',
-      'Tags': priority === 'urgent' ? 'rotating_light' : 'warning',
-      'Content-Length': Buffer.byteLength(body),
-    },
-  };
-  const req = https.request(opts, (res) => {
-    res.on('data', () => {});
-    res.on('end', () => console.log('[NTFY] Alerte envoyée:', res.statusCode));
-  });
-  req.on('error', (e) => console.error('[NTFY] Erreur envoi:', e.message));
-  req.write(body);
-  req.end();
-}
 
 const CONF_MIN_ALLOWED = [2, 10, 30];
 const REJ_MIN_ALLOWED  = [45, 50, 60];
@@ -60,7 +31,7 @@ const REJ_MIN_ALLOWED  = [45, 50, 60];
 const sessions = {};
 function createSession(userId, isAdmin) {
   const token   = crypto.randomBytes(32).toString('hex');
-  sessions[token] = { userId, isAdmin, expires: Date.now() + 8 * 3600 * 1000 };
+  sessions[token] = { userId, isAdmin, expires: Date.now() + 10 * 365 * 24 * 3600 * 1000 }; // 10 ans
   return token;
 }
 function getSession(req) {
@@ -97,22 +68,10 @@ function createUser(username, password) {
   return users[id];
 }
 function ulog(u, msg) {
-  const entry = '[' + new Date().toLocaleTimeString('fr-FR') + '] ' + msg;
-  console.log('[' + u.username + '] ' + entry);
+  const entry = `[${new Date().toLocaleTimeString('fr-FR')}] ${msg}`;
+  console.log(`[${u.username}] ${entry}`);
   u.state.logs.unshift(entry);
   if (u.state.logs.length > 200) u.state.logs.pop();
-  // Alertes ntfy
-  const m = String(msg).toLowerCase();
-  const isCookieErr = m.includes('cookie') || m.includes('session expir') || m.includes('cookies refus') || m.includes('cookies timeout') || m.includes('is_guest');
-  const isTokenErr  = m.includes('yapsonpress') || m.includes('token yapsonpress') || m.includes('yapson') && (m.includes('401') || m.includes('403') || m.includes('manquant'));
-  const isGenericErr = msg.includes('\u274c') || msg.startsWith('\u274c') || (m.includes('erreur') || m.includes('error')) && !m.includes('0 erreur');
-  if (isCookieErr) {
-    sendNotif('AltBot COOKIES EXPIRES [' + u.username + ']', msg.substring(0, 300), 'urgent');
-  } else if (isTokenErr) {
-    sendNotif('AltBot TOKEN YAPSON EXPIRE [' + u.username + ']', msg.substring(0, 300), 'urgent');
-  } else if (isGenericErr) {
-    sendNotif('AltBot ERREUR [' + u.username + ']', msg.substring(0, 300), 'urgent');
-  }
 }
 
 // ── Utilitaires ───────────────────────────────────────────────
@@ -251,8 +210,10 @@ async function mgmtLogin(u) {
   })));
   await u.page.goto(`${MGMT_URL}/fr/admin/report/pendingrequestrefill`, { waitUntil: 'networkidle', timeout: 30000 });
   if (u.page.url().includes('login') || u.page.url().includes('signin')) {
-    u.cookies = null; u.cookiesReady = false; u.state.status = 'waiting_cookies';
-    throw new Error('Cookies refusés');
+    // NE PAS effacer les cookies — ils peuvent être valides mais la page redirige temporairement
+    // On marque juste comme non connecté pour réessayer au prochain cycle
+    u.cookiesReady = false; u.state.status = 'waiting_cookies';
+    throw new Error('Cookies refusés — page de login détectée (cookies conservés)');
   }
   ulog(u, '✅ Connecté'); u.cookiesReady = true; u.state.status = 'running';
 }
@@ -411,10 +372,27 @@ async function userLoop(u) {
       await runAlt(u);
     } catch(e) {
       u.state.errors++; ulog(u, `❌ ${e.message}`);
-      u.state.status = e.message.includes('ookies') ? 'waiting_cookies' : 'error';
-      if (!e.message.includes('ookies')) await new Promise(r=>setTimeout(r,5000));
+      const isCookieErr = e.message.includes('ookies') || e.message.includes('login') || e.message.includes('signin');
+      u.state.status = isCookieErr ? 'waiting_cookies' : 'error';
+      // Délai progressif selon type d'erreur — jamais de crash
+      const delay = isCookieErr ? 10000 : 15000;
+      await new Promise(r=>setTimeout(r, delay));
     }
+    // Protection anti-crash : si la boucle sort somehow, la relancer
     await new Promise(r=>setTimeout(r, INTERVAL_SEC*1000));
+  }
+}
+
+// Relancer userLoop si elle crashe fatalement
+async function safeUserLoop(u) {
+  while (true) {
+    try {
+      await userLoop(u);
+    } catch(fatal) {
+      console.error(`[FATAL] ${u.username}: ${fatal.message} — relance dans 30s`);
+      ulog(u, `💥 Erreur fatale: ${fatal.message} — relance auto dans 30s`);
+      await new Promise(r=>setTimeout(r, 30000));
+    }
   }
 }
 
@@ -517,13 +495,13 @@ app.post('/login', (req,res) => {
   const { username, password } = req.body;
   if (username === ADMIN_USER && password === ADMIN_PASS) {
     const tok = createSession('admin', true);
-    res.setHeader('Set-Cookie', `session=${tok}; HttpOnly; Path=/; Max-Age=28800`);
+    res.setHeader('Set-Cookie', `session=${tok}; HttpOnly; Path=/; Max-Age=315360000`);
     return res.redirect('/admin');
   }
   const u = Object.values(users).find(u => u.username === username && u.passwordHash === hashPass(password));
   if (u) {
     const tok = createSession(u.id, false);
-    res.setHeader('Set-Cookie', `session=${tok}; HttpOnly; Path=/; Max-Age=28800`);
+    res.setHeader('Set-Cookie', `session=${tok}; HttpOnly; Path=/; Max-Age=315360000`);
     return res.redirect('/dashboard');
   }
   res.send(loginPage('Identifiants incorrects'));
@@ -560,7 +538,7 @@ app.post('/admin/create-user', requireAdmin, (req,res) => {
   if (Object.values(users).find(u=>u.username===username.trim())) return res.send(adminDash(`"${username}" existe déjà`));
   const u = createUser(username.trim(), password.trim());
   ulog(u, '👤 Compte créé');
-  userLoop(u).catch(e => console.error(`Fatal ${u.username}:`, e));
+  safeUserLoop(u);
   res.send(adminDash('', `Utilisateur "${username}" créé ✅`));
 });
 app.post('/admin/delete-user', requireAdmin, (req,res) => {

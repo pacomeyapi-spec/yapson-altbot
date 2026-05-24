@@ -9,8 +9,10 @@
 
 const express    = require('express');
 const fetch      = require('node-fetch');
-const crypto     = require('crypto');
+const crypto     = require('crypto')
 const { chromium } = require('playwright');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 
 const app = express();
 app.use(express.json());

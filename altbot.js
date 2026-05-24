@@ -564,6 +564,38 @@ app.get('/status', (req,res) => {
   const u=users[s.userId]; return u ? res.json(u.state) : res.status(404).json({error:'Introuvable'});
 });
 
-app.listen(PORT, () => {
-  console.log(`🌐 ALT-BOT multi-users port ${PORT} | Admin: ${ADMIN_USER}`);
-});
+// ── Firebase init + démarrage ──────────────────────────
+let db;
+try {
+    const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+    initializeApp({ credential: cert(sa) });
+    db = getFirestore();
+    console.log('✅ Firebase connecté');
+} catch(e) { console.error('❌ Firebase:', e.message); process.exit(1); }
+
+async function saveUser(u) {
+    try { await db.collection('altbot_users').doc(u.id).set({ id:u.id, username:u.username, passwordHash:u.passwordHash, yapsonToken:u.yapsonToken||'', cookies:u.cookies||'', confMin:u.confMin, rejMin:u.rejMin, paused:u.paused, updatedAt:FieldValue.serverTimestamp() }, { merge:true }); } catch(e) {}
+}
+async function deleteUserFromDB(id) {
+    try { await db.collection('altbot_users').doc(id).delete(); } catch(e) {}
+}
+async function loadUsersFromDB() {
+    try {
+          const snap = await db.collection('altbot_users').get();
+          for (const doc of snap.docs) {
+                  const d = doc.data();
+                  users[d.id] = { id:d.id, username:d.username, passwordHash:d.passwordHash, yapsonToken:d.yapsonToken||'', cookies:d.cookies||null, cookiesReady:false, confMin:d.confMin||10, rejMin:d.rejMin||50, paused:d.paused||false, browser:null, page:null, state:{ status:'waiting_cookies', polls:0, confirmed:0, rejected:0, approved:0, errors:0, logs:[], lastRun:null } };
+                  safeUserLoop(users[d.id]);
+          }
+          console.log(`✅ ${snap.size} user(s) chargé(s) Firebase`);
+    } catch(e) { console.error('[Firebase] loadUsers:', e.message); }
+}
+async function saveAdminPass(p) { try { await db.collection('altbot_config').doc('admin').set({ password:p }, { merge:true }); } catch(e) {} }
+async function loadAdminPass() { try { const d = await db.collection('altbot_config').doc('admin').get(); if (d.exists && d.data().password) ADMIN_PASS = d.data().password; } catch(e) {} }
+
+async function start() {
+    await loadAdminPass();
+    await loadUsersFromDB();
+    app.listen(PORT, () => { console.log(`🌐 ALT-BOT port ${PORT} | Admin: ${ADMIN_USER}`); });
+}
+start().catch(e => { console.error(e.message); process.exit(1); });

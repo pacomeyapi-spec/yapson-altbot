@@ -1,7 +1,7 @@
 {
   "name": "altbot",
-  "version": "1.0.0",
-  "description": "ALT-BOT — Confirmation dépôts my-managment via YapsonPress",
+  "version": "2.0.0",
+  "description": "ALT-BOT — Confirmation dépôts my-managment via YapsonPress + Firebase",
   "main": "altbot.js",
   "scripts": {
     "start": "node altbot.js"
@@ -10,6 +10,6 @@
     "express": "^4.18.2",
     "node-fetch": "^2.7.0",
     "playwright": "^1.40.0",
-        "firebase-admin": "^12.0.0"
+    "firebase-admin": "^12.0.0"
   }
 }

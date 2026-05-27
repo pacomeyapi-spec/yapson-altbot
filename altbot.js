@@ -1,15 +1,14 @@
 'use strict';
 
 // ============================================================
-// ALT-BOT — Multi-utilisateurs
-// - Admin : crée/supprime les comptes utilisateurs
-// - Chaque utilisateur a : login/mdp, cookies my-managment,
-//   token YapsonPress, config confMin/rejMin, bot indépendant
+// ALT-BOT — Multi-utilisateurs + Firebase Firestore
+// - Les comptes agents sont sauvegardés dans Firestore
+// - Résiste aux redémarrages Railway
 // ============================================================
 
-const express    = require('express');
-const fetch      = require('node-fetch');
-const crypto     = require('crypto')
+const express      = require('express');
+const fetch        = require('node-fetch');
+const crypto       = require('crypto');
 const { chromium } = require('playwright');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
@@ -17,6 +16,18 @@ const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// ── Firebase Init ─────────────────────────────────────────────
+let db;
+try {
+  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
+  initializeApp({ credential: cert(serviceAccount) });
+  db = getFirestore();
+  console.log('✅ Firebase Firestore connecté');
+} catch(e) {
+  console.error('❌ Firebase init failed:', e.message);
+  process.exit(1);
+}
 
 // ── Variables d'environnement ─────────────────────────────────
 const YAPSON_URL   = (process.env.YAPSON_URL || 'https://sms-mirror-production.up.railway.app').replace(/\/$/, '');
@@ -29,11 +40,86 @@ let   ADMIN_PASS   = process.env.ADMIN_PASS || 'admin123';
 const CONF_MIN_ALLOWED = [2, 10, 30];
 const REJ_MIN_ALLOWED  = [45, 50, 60];
 
-// ── Sessions ──────────────────────────────────────────────────
+// ── Persistance Firebase ──────────────────────────────────────
+// Sauvegarde un utilisateur dans Firestore
+async function saveUser(u) {
+  try {
+    await db.collection('altbot_users').doc(u.id).set({
+      id:           u.id,
+      username:     u.username,
+      passwordHash: u.passwordHash,
+      yapsonToken:  u.yapsonToken || '',
+      cookies:      u.cookies     || '',
+      confMin:      u.confMin,
+      rejMin:       u.rejMin,
+      paused:       u.paused,
+      updatedAt:    FieldValue.serverTimestamp(),
+    }, { merge: true });
+  } catch(e) {
+    console.error(`[Firebase] saveUser error: ${e.message}`);
+  }
+}
+
+// Supprime un utilisateur de Firestore
+async function deleteUserFromDB(userId) {
+  try {
+    await db.collection('altbot_users').doc(userId).delete();
+  } catch(e) {
+    console.error(`[Firebase] deleteUser error: ${e.message}`);
+  }
+}
+
+// Charge tous les utilisateurs depuis Firestore au démarrage
+async function loadUsersFromDB() {
+  try {
+    const snap = await db.collection('altbot_users').get();
+    let count = 0;
+    for (const doc of snap.docs) {
+      const data = doc.data();
+      const u = buildUserObject(data.id, data.username, null, data.passwordHash);
+      u.yapsonToken = data.yapsonToken || '';
+      u.cookies     = data.cookies     || '';
+      u.confMin     = data.confMin     || 10;
+      u.rejMin      = data.rejMin      || 50;
+      u.paused      = data.paused      || false;
+      u.cookiesReady = false; // toujours faux au démarrage, cookies doivent être ré-injectés
+      users[u.id]   = u;
+      safeUserLoop(u); // relancer la boucle de chaque utilisateur
+      count++;
+    }
+    console.log(`✅ ${count} utilisateur(s) chargé(s) depuis Firebase`);
+  } catch(e) {
+    console.error(`[Firebase] loadUsers error: ${e.message}`);
+  }
+}
+
+// Sauvegarde le mot de passe admin dans Firestore
+async function saveAdminPass(newPass) {
+  try {
+    await db.collection('altbot_config').doc('admin').set({ password: newPass }, { merge: true });
+  } catch(e) {
+    console.error(`[Firebase] saveAdminPass error: ${e.message}`);
+  }
+}
+
+// Charge le mot de passe admin depuis Firestore
+async function loadAdminPass() {
+  try {
+    const doc = await db.collection('altbot_config').doc('admin').get();
+    if (doc.exists && doc.data().password) {
+      ADMIN_PASS = doc.data().password;
+      console.log('✅ Mot de passe admin chargé depuis Firebase');
+    }
+  } catch(e) {
+    console.error(`[Firebase] loadAdminPass error: ${e.message}`);
+  }
+}
+
+// ── Sessions (RAM — OK, elles expirent et se recréent) ────────
 const sessions = {};
 function createSession(userId, isAdmin) {
-  const token   = crypto.randomBytes(32).toString('hex');
-  sessions[token] = { userId, isAdmin, expires: Date.now() + 10 * 365 * 24 * 3600 * 1000 }; // 10 ans
+  const token = crypto.randomBytes(32).toString('hex');
+  sessions[token] = { userId, isAdmin, expires: Date.now() + 10 * 365 * 24 * 3600 * 1000 };
   return token;
 }
 function getSession(req) {
@@ -54,21 +140,31 @@ function requireAdmin(req, res, next) {
   req.session = s; next();
 }
 
-// ── Stockage utilisateurs ─────────────────────────────────────
+// ── Stockage utilisateurs (RAM + Firebase) ────────────────────
 const users = {};
 function hashPass(p) { return crypto.createHash('sha256').update(p).digest('hex'); }
-function createUser(username, password) {
-  const id = crypto.randomBytes(8).toString('hex');
-  users[id] = {
+
+// Construit l'objet user en RAM (sans sauvegarder dans Firebase)
+function buildUserObject(id, username, password, existingHash) {
+  return {
     id, username,
-    passwordHash: hashPass(password),
+    passwordHash: existingHash || hashPass(password),
     yapsonToken: '', cookies: null, cookiesReady: false,
     confMin: 10, rejMin: 50, paused: false,
     browser: null, page: null,
     state: { status: 'waiting_cookies', polls: 0, confirmed: 0, rejected: 0, approved: 0, errors: 0, logs: [], lastRun: null },
   };
-  return users[id];
 }
+
+// Crée un utilisateur en RAM ET dans Firebase
+async function createUser(username, password) {
+  const id = crypto.randomBytes(8).toString('hex');
+  const u  = buildUserObject(id, username, password);
+  users[id] = u;
+  await saveUser(u); // persister immédiatement
+  return u;
+}
+
 function ulog(u, msg) {
   const entry = `[${new Date().toLocaleTimeString('fr-FR')}] ${msg}`;
   console.log(`[${u.username}] ${entry}`);
@@ -212,8 +308,6 @@ async function mgmtLogin(u) {
   })));
   await u.page.goto(`${MGMT_URL}/fr/admin/report/pendingrequestrefill`, { waitUntil: 'networkidle', timeout: 30000 });
   if (u.page.url().includes('login') || u.page.url().includes('signin')) {
-    // NE PAS effacer les cookies — ils peuvent être valides mais la page redirige temporairement
-    // On marque juste comme non connecté pour réessayer au prochain cycle
     u.cookiesReady = false; u.state.status = 'waiting_cookies';
     throw new Error('Cookies refusés — page de login détectée (cookies conservés)');
   }
@@ -376,16 +470,13 @@ async function userLoop(u) {
       u.state.errors++; ulog(u, `❌ ${e.message}`);
       const isCookieErr = e.message.includes('ookies') || e.message.includes('login') || e.message.includes('signin');
       u.state.status = isCookieErr ? 'waiting_cookies' : 'error';
-      // Délai progressif selon type d'erreur — jamais de crash
       const delay = isCookieErr ? 10000 : 15000;
       await new Promise(r=>setTimeout(r, delay));
     }
-    // Protection anti-crash : si la boucle sort somehow, la relancer
     await new Promise(r=>setTimeout(r, INTERVAL_SEC*1000));
   }
 }
 
-// Relancer userLoop si elle crashe fatalement
 async function safeUserLoop(u) {
   while (true) {
     try {
@@ -513,49 +604,63 @@ app.get('/', (req,res) => { const s=getSession(req); if(!s) return res.redirect(
 
 // Routes utilisateur
 app.get('/dashboard', requireLogin, (req,res) => { const u=users[req.session.userId]; if(!u) return res.redirect('/login'); res.send(userDash(u)); });
-app.post('/user/stop',   requireLogin, (req,res) => { const u=users[req.session.userId]; if(u){u.paused=true;u.state.status='paused';ulog(u,'⏸ Pausé');} res.redirect('/dashboard'); });
-app.post('/user/start',  requireLogin, (req,res) => { const u=users[req.session.userId]; if(u){u.paused=false;u.state.status='running';ulog(u,'▶ Repris');} res.redirect('/dashboard'); });
-app.post('/user/reset-cookies', requireLogin, (req,res) => { const u=users[req.session.userId]; if(u){u.cookies=null;u.cookiesReady=false;u.state.status='waiting_cookies';ulog(u,'🍪 Cookies reset');} res.redirect('/dashboard'); });
-app.post('/user/token',  requireLogin, (req,res) => { const u=users[req.session.userId]; if(u){const t=(req.body.token||'').trim();if(t){u.yapsonToken=t;ulog(u,'🔑 Token mis à jour');}} res.redirect('/dashboard'); });
-app.post('/user/config', requireLogin, (req,res) => {
+app.post('/user/stop',   requireLogin, (req,res) => { const u=users[req.session.userId]; if(u){u.paused=true;u.state.status='paused';ulog(u,'⏸ Pausé');saveUser(u);} res.redirect('/dashboard'); });
+app.post('/user/start',  requireLogin, (req,res) => { const u=users[req.session.userId]; if(u){u.paused=false;u.state.status='running';ulog(u,'▶ Repris');saveUser(u);} res.redirect('/dashboard'); });
+app.post('/user/reset-cookies', requireLogin, (req,res) => { const u=users[req.session.userId]; if(u){u.cookies=null;u.cookiesReady=false;u.state.status='waiting_cookies';ulog(u,'🍪 Cookies reset');saveUser(u);} res.redirect('/dashboard'); });
+app.post('/user/token',  requireLogin, async (req,res) => {
+  const u=users[req.session.userId];
+  if(u){const t=(req.body.token||'').trim();if(t){u.yapsonToken=t;ulog(u,'🔑 Token mis à jour');await saveUser(u);}}
+  res.redirect('/dashboard');
+});
+app.post('/user/config', requireLogin, async (req,res) => {
   const u=users[req.session.userId]; if(!u) return res.redirect('/login');
   const nc=parseInt(req.body.confMin||'10',10); const nr=parseInt(req.body.rejMin||'50',10);
   if(CONF_MIN_ALLOWED.includes(nc)){u.confMin=nc;ulog(u,`⚙ confMin → ${nc}min`);}
   if(REJ_MIN_ALLOWED.includes(nr)){u.rejMin=nr;ulog(u,`⚙ rejMin → ${nr}min`);}
+  await saveUser(u);
   res.redirect('/dashboard');
 });
 app.post('/user/cookies', requireLogin, (req,res) => {
   const u=users[req.session.userId]; if(!u) return res.redirect('/login');
   const raw=(req.body.cookies||'').trim(); if(!raw) return res.redirect('/dashboard');
-  try { const p=JSON.parse(raw); if(!Array.isArray(p)) throw new Error('Tableau JSON requis'); u.cookies=raw; u.cookiesReady=false; ulog(u,`🍪 ${p.length} cookie(s)`); mgmtLogin(u).catch(e=>ulog(u,`❌ ${e.message}`)); }
+  try {
+    const p=JSON.parse(raw);
+    if(!Array.isArray(p)) throw new Error('Tableau JSON requis');
+    u.cookies=raw; u.cookiesReady=false;
+    ulog(u,`🍪 ${p.length} cookie(s)`);
+    saveUser(u); // sauvegarder les cookies dans Firebase
+    mgmtLogin(u).catch(e=>ulog(u,`❌ ${e.message}`));
+  }
   catch(e) { ulog(u,`❌ Cookies invalides: ${e.message}`); }
   res.redirect('/dashboard');
 });
 
 // Routes admin
 app.get('/admin', requireAdmin, (req,res) => res.send(adminDash()));
-app.post('/admin/create-user', requireAdmin, (req,res) => {
+app.post('/admin/create-user', requireAdmin, async (req,res) => {
   const { username, password } = req.body;
   if (!username || !password) return res.send(adminDash('Nom et mot de passe requis'));
   if (Object.values(users).find(u=>u.username===username.trim())) return res.send(adminDash(`"${username}" existe déjà`));
-  const u = createUser(username.trim(), password.trim());
+  const u = await createUser(username.trim(), password.trim()); // ← sauvegarde Firebase
   ulog(u, '👤 Compte créé');
   safeUserLoop(u);
   res.send(adminDash('', `Utilisateur "${username}" créé ✅`));
 });
-app.post('/admin/delete-user', requireAdmin, (req,res) => {
+app.post('/admin/delete-user', requireAdmin, async (req,res) => {
   const u = users[req.body.userId];
   if (!u) return res.send(adminDash('Utilisateur introuvable'));
   const name = u.username; u.paused = true;
   if (u.browser) u.browser.close().catch(()=>{});
   delete users[req.body.userId];
+  await deleteUserFromDB(req.body.userId); // ← suppression Firebase
   res.send(adminDash('', `"${name}" supprimé ✅`));
 });
-app.post('/admin/change-password', requireAdmin, (req,res) => {
+app.post('/admin/change-password', requireAdmin, async (req,res) => {
   const { oldPass, newPass } = req.body;
   if (oldPass !== ADMIN_PASS) return res.send(adminDash('Ancien mot de passe incorrect'));
   if (!newPass || newPass.length < 4) return res.send(adminDash('Nouveau mot de passe trop court'));
   ADMIN_PASS = newPass;
+  await saveAdminPass(newPass); // ← sauvegarde Firebase
   res.send(adminDash('', 'Mot de passe admin changé ✅'));
 });
 app.get('/status', (req,res) => {
@@ -564,38 +669,16 @@ app.get('/status', (req,res) => {
   const u=users[s.userId]; return u ? res.json(u.state) : res.status(404).json({error:'Introuvable'});
 });
 
-// ── Firebase init + démarrage ──────────────────────────
-let db;
-try {
-    const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}');
-    initializeApp({ credential: cert(sa) });
-    db = getFirestore();
-    console.log('✅ Firebase connecté');
-} catch(e) { console.error('❌ Firebase:', e.message); process.exit(1); }
-
-async function saveUser(u) {
-    try { await db.collection('altbot_users').doc(u.id).set({ id:u.id, username:u.username, passwordHash:u.passwordHash, yapsonToken:u.yapsonToken||'', cookies:u.cookies||'', confMin:u.confMin, rejMin:u.rejMin, paused:u.paused, updatedAt:FieldValue.serverTimestamp() }, { merge:true }); } catch(e) {}
-}
-async function deleteUserFromDB(id) {
-    try { await db.collection('altbot_users').doc(id).delete(); } catch(e) {}
-}
-async function loadUsersFromDB() {
-    try {
-          const snap = await db.collection('altbot_users').get();
-          for (const doc of snap.docs) {
-                  const d = doc.data();
-                  users[d.id] = { id:d.id, username:d.username, passwordHash:d.passwordHash, yapsonToken:d.yapsonToken||'', cookies:d.cookies||null, cookiesReady:false, confMin:d.confMin||10, rejMin:d.rejMin||50, paused:d.paused||false, browser:null, page:null, state:{ status:'waiting_cookies', polls:0, confirmed:0, rejected:0, approved:0, errors:0, logs:[], lastRun:null } };
-                  safeUserLoop(users[d.id]);
-          }
-          console.log(`✅ ${snap.size} user(s) chargé(s) Firebase`);
-    } catch(e) { console.error('[Firebase] loadUsers:', e.message); }
-}
-async function saveAdminPass(p) { try { await db.collection('altbot_config').doc('admin').set({ password:p }, { merge:true }); } catch(e) {} }
-async function loadAdminPass() { try { const d = await db.collection('altbot_config').doc('admin').get(); if (d.exists && d.data().password) ADMIN_PASS = d.data().password; } catch(e) {} }
-
+// ── Démarrage avec chargement Firebase ───────────────────────
 async function start() {
-    await loadAdminPass();
-    await loadUsersFromDB();
-    app.listen(PORT, () => { console.log(`🌐 ALT-BOT port ${PORT} | Admin: ${ADMIN_USER}`); });
+  await loadAdminPass();   // charger le mdp admin depuis Firebase
+  await loadUsersFromDB(); // charger tous les comptes agents depuis Firebase
+  app.listen(PORT, () => {
+    console.log(`🌐 ALT-BOT multi-users port ${PORT} | Admin: ${ADMIN_USER}`);
+  });
 }
-start().catch(e => { console.error(e.message); process.exit(1); });
+
+start().catch(e => {
+  console.error('❌ Démarrage échoué:', e.message);
+  process.exit(1);
+});

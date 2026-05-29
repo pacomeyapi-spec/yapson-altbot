@@ -11,8 +11,6 @@ const crypto = require('crypto');
 const { chromium } = require('playwright');
 const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
-const http = require('http');
-const { WebSocketServer } = require('ws');
 
 const app = express();
 app.use(express.json());

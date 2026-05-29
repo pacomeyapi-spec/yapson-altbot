@@ -512,12 +512,13 @@ res.send(`<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>Navigateur — ${u.username}</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:#0f1117;color:#e2e8f0;font-family:monospace;display:flex;flex-direction:column;height:100vh;overflow:hidden}
-#topbar{background:#1e1e2e;padding:8px;display:flex;gap:6px;align-items:center;flex-shrink:0}
+html,body{height:100%}
+body{background:#0f1117;color:#e2e8f0;font-family:monospace;display:flex;flex-direction:column;height:100vh;height:100dvh;overflow:hidden}
+#topbar{background:#1e1e2e;padding:8px;padding-top:calc(8px + env(safe-area-inset-top,0));display:flex;gap:6px;align-items:center;flex-shrink:0;flex-wrap:wrap}
 #urlbar{flex:1;background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:6px;padding:5px 8px;font-size:13px}
 .tbtn{border:none;border-radius:6px;padding:5px 10px;font-size:12px;font-weight:bold;cursor:pointer;white-space:nowrap}
 .tbtn-green{background:#a6e3a1;color:#1e1e2e}
@@ -525,11 +526,12 @@ body{background:#0f1117;color:#e2e8f0;font-family:monospace;display:flex;flex-di
 .tbtn-purple{background:#cba6f7;color:#1e1e2e}
 .tbtn-red{background:#f38ba8;color:#1e1e2e}
 .tbtn-orange{background:#fab387;color:#1e1e2e}
-#screen-wrap{flex:1;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#000;cursor:crosshair}
+#screen-wrap{flex:1 1 auto;min-height:0;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#000;cursor:crosshair}
 #screen{max-width:100%;max-height:100%;display:block;touch-action:none}
-#keyboard{background:#1e1e2e;padding:6px;flex-shrink:0}
+#keyboard{background:#1e1e2e;padding:6px;padding-bottom:calc(6px + env(safe-area-inset-bottom,0));flex-shrink:0}
 #textinput{width:100%;background:#313244;color:#cdd6f4;border:1px solid #45475a;border-radius:6px;padding:6px;font-size:14px;margin-bottom:5px}
-.keyrow{display:flex;gap:4px;margin-bottom:4px;justify-content:center}
+.keyrow{display:flex;gap:4px;margin-bottom:4px;justify-content:center;flex-wrap:wrap}
+#keyboard .keyrow .tbtn{padding:10px 12px;font-size:13px;flex:1 1 auto;min-width:80px;max-width:140px}
 .key{background:#313244;color:#cdd6f4;border:none;border-radius:5px;padding:7px 10px;font-size:13px;cursor:pointer;flex:1;min-width:28px;max-width:40px}
 .key-wide{max-width:70px}
 .key-wider{max-width:90px}

@@ -247,17 +247,18 @@ return res.ok;
 }
 
 // ── Playwright ────────────────────────────────────────────────
+const LAUNCH_ARGS = ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--single-process','--no-zygote','--disable-gpu','--disable-software-rasterizer','--disable-background-networking','--disable-extensions','--disable-renderer-backgrounding'];
 async function installPlaywright() {
 try { require('child_process').execSync('npx playwright install chromium --with-deps', { stdio: 'inherit', timeout: 120000 }); } catch {}
 }
 async function ensureBrowser(u) {
 if (!u.browser || !u.browser.isConnected()) {
 ulog(u, '🚀 Lancement Chromium…');
-try { u.browser = await chromium.launch({ headless: true, args: ['--no-sandbox','--disable-setuid-sandbox'] }); }
+try { u.browser = await chromium.launch({ headless: true, args: LAUNCH_ARGS }); }
 catch(e) {
 if (e.message.includes('Executable') || e.message.includes("doesn't exist")) {
 ulog(u, '🔧 Installation Chromium…'); await installPlaywright();
-u.browser = await chromium.launch({ headless: true, args: ['--no-sandbox','--disable-setuid-sandbox'] });
+u.browser = await chromium.launch({ headless: true, args: LAUNCH_ARGS });
 } else throw e;
 }
 }
@@ -349,14 +350,14 @@ ulog(u, '🌐 Lancement navigateur login…');
 try {
 u.loginBrowser = await chromium.launch({
 headless: true,
-args: ['--no-sandbox', '--disable-setuid-sandbox', '--window-size=390,844']
+args: [...LAUNCH_ARGS, '--window-size=390,844']
 });
 } catch(e) {
 if (e.message.includes('Executable') || e.message.includes("doesn't exist")) {
 await installPlaywright();
 u.loginBrowser = await chromium.launch({
 headless: true,
-args: ['--no-sandbox', '--disable-setuid-sandbox', '--window-size=390,844']
+args: [...LAUNCH_ARGS, '--window-size=390,844']
 });
 } else throw e;
 }

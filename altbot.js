@@ -125,9 +125,9 @@ id, username,
 passwordHash: existingHash || hashPass(password),
 yapsonToken: '', cookies: null, cookiesReady: false,
 confMin: 10, rejMin: 50, paused: false,
-browser: null, page: null,
-// Navigateur intégré (login manuel)
-loginBrowser: null, loginPage: null, loginScreenshot: null,
+browser: null, context: null, page: null,
+// Navigateur intégré (login manuel) — contexte isolé par agent
+loginBrowser: null, loginContext: null, loginPage: null, loginScreenshot: null,
 loginWsClients: new Set(),
 state: { status: 'waiting_cookies', polls: 0, confirmed: 0, rejected: 0, approved: 0, errors: 0, logs: [], lastRun: null },
 };
@@ -247,24 +247,34 @@ return res.ok;
 }
 
 // ── Playwright ────────────────────────────────────────────────
-const LAUNCH_ARGS = ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--single-process','--no-zygote','--disable-gpu','--disable-software-rasterizer','--disable-background-networking','--disable-extensions','--disable-renderer-backgrounding'];
+const LAUNCH_ARGS = ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--disable-software-rasterizer','--disable-background-networking','--disable-extensions','--disable-renderer-backgrounding','--process-per-site'];
 async function installPlaywright() {
 try { require('child_process').execSync('npx playwright install chromium --with-deps', { stdio: 'inherit', timeout: 120000 }); } catch {}
 }
+// ── Navigateur Chromium PARTAGÉ (1 seul process pour tout le serveur) ──
+// Chaque agent obtient ensuite SON propre contexte isolé (cookies séparés).
+let sharedBrowser = null;
+async function getSharedBrowser() {
+  if (sharedBrowser && sharedBrowser.isConnected()) return sharedBrowser;
+  try {
+    sharedBrowser = await chromium.launch({ headless: true, args: LAUNCH_ARGS });
+  } catch(e) {
+    if (e.message.includes('Executable') || e.message.includes("doesn't exist")) {
+      await installPlaywright();
+      sharedBrowser = await chromium.launch({ headless: true, args: LAUNCH_ARGS });
+    } else throw e;
+  }
+  return sharedBrowser;
+}
 async function ensureBrowser(u) {
-if (!u.browser || !u.browser.isConnected()) {
-ulog(u, '🚀 Lancement Chromium…');
-try { u.browser = await chromium.launch({ headless: true, args: LAUNCH_ARGS }); }
-catch(e) {
-if (e.message.includes('Executable') || e.message.includes("doesn't exist")) {
-ulog(u, '🔧 Installation Chromium…'); await installPlaywright();
-u.browser = await chromium.launch({ headless: true, args: LAUNCH_ARGS });
-} else throw e;
-}
-}
-if (!u.page || u.page.isClosed()) {
-u.page = await u.browser.newPage();
-await u.page.setExtraHTTPHeaders({ 'Accept-Language': 'fr-FR,fr;q=0.9' });
+const browser = await getSharedBrowser();
+try {
+if (!u.context) u.context = await browser.newContext({ extraHTTPHeaders: { 'Accept-Language': 'fr-FR,fr;q=0.9' } });
+if (!u.page || u.page.isClosed()) u.page = await u.context.newPage();
+} catch(e) {
+// contexte invalidé (navigateur relancé) → recréer
+u.context = await browser.newContext({ extraHTTPHeaders: { 'Accept-Language': 'fr-FR,fr;q=0.9' } });
+u.page = await u.context.newPage();
 }
 }
 async function mgmtLogin(u) {
@@ -345,27 +355,15 @@ if (await comm.count() > 0) await setVueInput(u, comm, String(montant));
 // sans avoir besoin d'extraire les cookies manuellement
 
 async function ensureLoginBrowser(u) {
-if (!u.loginBrowser || !u.loginBrowser.isConnected()) {
-ulog(u, '🌐 Lancement navigateur login…');
+ulog(u, '🌐 Préparation navigateur login…');
+const browser = await getSharedBrowser();
+const opts = { viewport: { width: 390, height: 844 }, extraHTTPHeaders: { 'Accept-Language': 'fr-FR,fr;q=0.9' } };
 try {
-u.loginBrowser = await chromium.launch({
-headless: true,
-args: [...LAUNCH_ARGS, '--window-size=390,844']
-});
+if (!u.loginContext) u.loginContext = await browser.newContext(opts);
+if (!u.loginPage || u.loginPage.isClosed()) u.loginPage = await u.loginContext.newPage();
 } catch(e) {
-if (e.message.includes('Executable') || e.message.includes("doesn't exist")) {
-await installPlaywright();
-u.loginBrowser = await chromium.launch({
-headless: true,
-args: [...LAUNCH_ARGS, '--window-size=390,844']
-});
-} else throw e;
-}
-}
-if (!u.loginPage || u.loginPage.isClosed()) {
-u.loginPage = await u.loginBrowser.newPage();
-await u.loginPage.setViewportSize({ width: 390, height: 844 });
-await u.loginPage.setExtraHTTPHeaders({ 'Accept-Language': 'fr-FR,fr;q=0.9' });
+u.loginContext = await browser.newContext(opts);
+u.loginPage = await u.loginContext.newPage();
 }
 }
 
@@ -384,7 +382,7 @@ return u.loginScreenshot;
 
 // Boucle de capture screenshot en continu
 async function startScreenshotLoop(u) {
-while (u.loginBrowser && u.loginBrowser.isConnected() && u.loginPage && !u.loginPage.isClosed()) {
+while (u.loginContext && u.loginPage && !u.loginPage.isClosed()) {
 await captureLoginScreenshot(u);
 await new Promise(r => setTimeout(r, 500)); // 2 fps
 }
@@ -409,7 +407,7 @@ res.redirect('/dashboard');
 app.post('/user/browser/close', requireLogin, async (req, res) => {
 const u = users[req.session.userId]; if (!u) return res.redirect('/login');
 try {
-if (u.loginBrowser) { await u.loginBrowser.close(); u.loginBrowser = null; u.loginPage = null; }
+if (u.loginContext) { await u.loginContext.close().catch(()=>{}); } u.loginContext = null; u.loginPage = null; u.loginBrowser = null;
 ulog(u, '🌐 Navigateur login fermé');
 } catch {}
 res.redirect('/dashboard');
@@ -508,7 +506,7 @@ res.send(Buffer.from(u.loginScreenshot, 'base64'));
 // Page du navigateur intégré (interface iPad-friendly)
 app.get('/user/browser', requireLogin, (req, res) => {
 const u = users[req.session.userId]; if (!u) return res.redirect('/login');
-const hasNav = u.loginBrowser && u.loginBrowser.isConnected() && u.loginPage && !u.loginPage.isClosed();
+const hasNav = u.loginContext && u.loginPage && !u.loginPage.isClosed();
 res.send(`<!DOCTYPE html>
 <html>
 <head>
@@ -828,7 +826,7 @@ const sc = u.state.status||'starting';
 const lr = u.state.lastRun ? new Date(u.state.lastRun).toLocaleTimeString('fr-FR') : '—';
 const tp = u.yapsonToken ? u.yapsonToken.substring(0,8)+'•'.repeat(12)+u.yapsonToken.slice(-4) : '(non défini)';
 const logs = u.state.logs.slice(0,80).map(l=>`<div>${l}</div>`).join('');
-const hasNav = u.loginBrowser && u.loginBrowser.isConnected() && u.loginPage && !u.loginPage.isClosed();
+const hasNav = u.loginContext && u.loginPage && !u.loginPage.isClosed();
 return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ALT-BOT — ${u.username}</title><style>${CSS}</style></head><body>
 <div class="row" style="justify-content:space-between;margin-bottom:14px"><h1>🤖 ${u.username}</h1><a href="/logout" class="btn btn-red">Déconnexion</a></div>
 <div style="margin-bottom:12px"><span class="status ${sc}">${labels[sc]||sc}</span><span style="font-size:11px;color:#6c7086;margin-left:8px">Polls: ${u.state.polls} | ${lr}</span></div>
@@ -980,8 +978,8 @@ app.post('/admin/delete-user', requireAdmin, async (req,res) => {
 const u = users[req.body.userId];
 if (!u) return res.send(adminDash('Utilisateur introuvable'));
 const name = u.username; u.paused = true;
-if (u.browser) u.browser.close().catch(()=>{});
-if (u.loginBrowser) u.loginBrowser.close().catch(()=>{});
+if (u.context) u.context.close().catch(()=>{});
+if (u.loginContext) u.loginContext.close().catch(()=>{});
 delete users[req.body.userId];
 await deleteUserFromDB(req.body.userId);
 res.send(adminDash('', `"${name}" supprimé ✅`));

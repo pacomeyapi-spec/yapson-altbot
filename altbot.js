@@ -854,7 +854,7 @@ return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ALT-BOT — ${u.
 
 <div class="section"><div class="section-title">🔑 Token YapsonPress</div>
 <form method="POST" action="/user/token" class="row">
-<input type="password" name="token" style="width:280px" placeholder="Token YapsonPress (sans Bearer)">
+<input type="password" name="token" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="width:280px" placeholder="Token YapsonPress (sans Bearer)">
 <button class="btn btn-purple">💾 Enregistrer</button>
 <span style="font-size:11px;color:${u.yapsonToken?'#a6e3a1':'#f38ba8'}">${u.yapsonToken?'✅ Actif':'⚠ Manquant'}</span>
 </form><div class="hint">Actuel : ${tp}</div></div>
@@ -867,9 +867,25 @@ return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>ALT-BOT — ${u.
 <button class="btn btn-purple">Appliquer</button>
 </form></div>
 <div class="section"><div class="section-title">🍪 Cookies manuels (optionnel)</div>
-<form method="POST" action="/user/cookies"><textarea name="cookies" rows="3" style="width:100%;margin-bottom:8px" placeholder='[{"name":"...","value":"..."}]'></textarea><br><button class="btn btn-blue">💉 Injecter</button></form></div>
+<form method="POST" action="/user/cookies"><textarea name="cookies" rows="3" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="width:100%;margin-bottom:8px" placeholder='[{"name":"...","value":"..."}]'></textarea><br><button class="btn btn-blue">💉 Injecter</button></form></div>
 <div class="section"><div class="section-title">📋 Logs</div><div class="logs">${logs}</div></div>
-<script>if (${JSON.stringify(u.state.status)} === 'running') { setTimeout(() => location.reload(), 10000); }</script>
+<script>
+(function(){
+  // iOS restaure le focus après un rechargement → on le retire pour ne pas rouvrir le clavier
+  window.addEventListener('pageshow', function(){
+    try { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch(e){}
+  });
+  if (${JSON.stringify(u.state.status)} === 'running') {
+    setInterval(function(){
+      var a = document.activeElement;
+      // ne pas recharger si l'utilisateur est en train de saisir (sinon le clavier se rouvre)
+      if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT')) return;
+      if (document.hidden) return;
+      location.reload();
+    }, 10000);
+  }
+})();
+</script>
 </body></html>`;
 }
 

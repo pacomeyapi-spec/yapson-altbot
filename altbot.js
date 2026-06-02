@@ -197,7 +197,7 @@ return ts < 1e11 ? ts * 1000 : ts;
 }
 function parseMsg(sender, content) {
 if (sender === 'Wave Business') {
-const m = content.match(/\((0\d{9})\)\s+a\s+pay[eé]\s+([\d\s\u00a0.,]+)\s*F/i);
+const m = content.match(/\((0\d{9})\)\s+(?:a\s+pay[eé]|paid)\s+([\d\s\u00a0.,]+)\s*F/i);
 if (m) return { phone: m[1], amount: parseAmount(m[2]) };
 }
 if (sender === '+454' || sender.includes('MobileMoney') || sender.includes('Orange')) {
